@@ -1,0 +1,481 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <title>lalala lalaalla/title>
+    <style>
+        body { margin: 0; overflow: hidden; background-color: #000; }
+        canvas { display: block; }
+        #videoInput, #handCanvas { 
+            position: absolute; 
+            top: 10px; 
+            left: 10px; 
+            width: 320px; 
+            height: 240px; 
+            z-index: 1;
+        }
+        #audioVisualizer { 
+            position: absolute; 
+            bottom: 10px; 
+            left: 10px; 
+            width: 320px; 
+            height: 100px; 
+            z-index: 1;
+        }
+        #audioInput { 
+            position: absolute; 
+            bottom: 120px; 
+            left: 10px; 
+            z-index: 1;
+        }
+    </style>
+</head>
+<body>
+    <video id="videoInput" autoplay playsinline></video>
+    <canvas id="handCanvas"></canvas>
+    <canvas id="audioVisualizer"></canvas>
+    <input type="file" id="audioInput" accept="audio/*">
+
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/@mediapipe/hands/hands.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/@mediapipe/camera_utils/camera_utils.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/@mediapipe/drawing_utils/drawing_utils.js"></script>
+
+    <script>
+    let scene, camera, renderer, particleSystem, backgroundSystem;
+    let audioContext, analyser, dataArray, microphoneAnalyser, microphoneDataArray;
+    let leftHand = null, rightHand = null;
+    let currentGesture = '';
+    let particleCount = 20000;
+    let targetPositions = new Float32Array(particleCount * 3);
+    let audioIntensity = 0;
+    let isSpeaking = false;
+    let audioMesh, audioMeshMaterial;
+    let handMesh, handMaterial;
+
+    function init() {
+        scene = new THREE.Scene();
+        camera = new THREE.PerspectiveCamera(75, window.innerWidth / window.innerHeight, 0.1, 1000);
+        renderer = new THREE.WebGLRenderer({ antialias: true });
+        renderer.setSize(window.innerWidth, window.innerHeight);
+        document.body.appendChild(renderer.domElement);
+
+        initParticles();
+        initBackground();
+        initAudio();
+        initHandTracking();
+
+        camera.position.set(0, 0, 30);
+        camera.lookAt(scene.position);
+
+        window.addEventListener('resize', onWindowResize, false);
+
+        animate();
+    }
+
+    function initParticles() {
+        const particles = new THREE.BufferGeometry();
+        const positions = new Float32Array(particleCount * 3);
+        const colors = new Float32Array(particleCount * 3);
+
+        for (let i = 0; i < particleCount * 3; i += 3) {
+            positions[i] = (Math.random() - 0.5) * 20;
+            positions[i + 1] = (Math.random() - 0.5) * 20;
+            positions[i + 2] = (Math.random() - 0.5) * 20;
+            colors[i] = 0.2;     // R
+            colors[i + 1] = 0.5; // G
+            colors[i + 2] = 1;   // B
+        }
+
+        particles.setAttribute('position', new THREE.BufferAttribute(positions, 3));
+        particles.setAttribute('color', new THREE.BufferAttribute(colors, 3));
+
+        const material = new THREE.PointsMaterial({
+            size: 0.05,
+            vertexColors: true,
+            transparent: true,
+            opacity: 0.8,
+            blending: THREE.AdditiveBlending
+        });
+
+        particleSystem = new THREE.Points(particles, material);
+        scene.add(particleSystem);
+    }
+
+    function initBackground() {
+        const backgroundGeometry = new THREE.BufferGeometry();
+        const backgroundPositions = new Float32Array(particleCount * 3);
+        const backgroundColors = new Float32Array(particleCount * 3);
+
+        for (let i = 0; i < particleCount * 3; i += 3) {
+            backgroundPositions[i] = (Math.random() - 0.5) * 100;
+            backgroundPositions[i + 1] = (Math.random() - 0.5) * 100;
+            backgroundPositions[i + 2] = (Math.random() - 0.5) * 100 - 50;
+            backgroundColors[i] = 0.5;     // R
+            backgroundColors[i + 1] = 0.2; // G
+            backgroundColors[i + 2] = 0.7; // B
+        }
+
+        backgroundGeometry.setAttribute('position', new THREE.BufferAttribute(backgroundPositions, 3));
+        backgroundGeometry.setAttribute('color', new THREE.BufferAttribute(backgroundColors, 3));
+
+        const backgroundMaterial = new THREE.PointsMaterial({
+            size: 0.1,
+            vertexColors: true,
+            transparent: true,
+            opacity: 0.5,
+            blending: THREE.AdditiveBlending
+        });
+
+        backgroundSystem = new THREE.Points(backgroundGeometry, backgroundMaterial);
+        scene.add(backgroundSystem);
+    }
+
+    function initAudio() {
+        audioContext = new (window.AudioContext || window.webkitAudioContext)();
+        analyser = audioContext.createAnalyser();
+        analyser.fftSize = 256;
+        dataArray = new Uint8Array(analyser.frequencyBinCount);
+
+        microphoneAnalyser = audioContext.createAnalyser();
+        microphoneAnalyser.fftSize = 256;
+        microphoneDataArray = new Uint8Array(microphoneAnalyser.frequencyBinCount);
+
+        navigator.mediaDevices.getUserMedia({ audio: true })
+            .then(stream => {
+                const microphoneSource = audioContext.createMediaStreamSource(stream);
+                microphoneSource.connect(microphoneAnalyser);
+            })
+            .catch(err => console.error('Error accessing microphone:', err));
+
+        document.getElementById('audioInput').addEventListener('change', function(e) {
+            const file = e.target.files[0];
+            const reader = new FileReader();
+            reader.onload = function(e) {
+                audioContext.decodeAudioData(e.target.result, function(buffer) {
+                    const source = audioContext.createBufferSource();
+                    source.buffer = buffer;
+                    source.connect(analyser);
+                    source.connect(audioContext.destination);
+                    source.start(0);
+                });
+            };
+            reader.readAsArrayBuffer(file);
+        });
+
+        const audioGeometry = new THREE.PlaneGeometry(50, 50, 32, 32);
+        audioMeshMaterial = new THREE.MeshBasicMaterial({
+            color: 0xffffff,
+            wireframe: true,
+            transparent: true,
+            opacity: 0.1
+        });
+        audioMesh = new THREE.Mesh(audioGeometry, audioMeshMaterial);
+        audioMesh.position.set(0, 0, -100);  // Situar el plano lejos
+        scene.add(audioMesh);
+    }
+
+    function initHandTracking() {
+        const videoElement = document.getElementById('videoInput');
+        const handCanvas = document.getElementById('handCanvas');
+        const ctx = handCanvas.getContext('2d');
+
+        const hands = new Hands({
+            locateFile: (file) => `https://cdn.jsdelivr.net/npm/@mediapipe/hands/${file}`
+        });
+
+        hands.setOptions({
+            maxNumHands: 2,
+            modelComplexity: 1,
+            minDetectionConfidence: 0.5,
+            minTrackingConfidence: 0.5
+        });
+
+        hands.onResults(onResults);
+
+        const cameraVideo = new Camera(videoElement, {
+            onFrame: async () => {
+                await hands.send({image: videoElement});
+            },
+            width: 640,
+            height: 480
+        });
+        cameraVideo.start();
+
+        function onResults(results) {
+            ctx.save();
+            ctx.clearRect(0, 0, handCanvas.width, handCanvas.height);
+            ctx.drawImage(results.image, 0, 0, handCanvas.width, handCanvas.height);
+
+            leftHand = null;
+            rightHand = null;
+
+            if (results.multiHandLandmarks) {
+                for (let i = 0; i < results.multiHandLandmarks.length; i++) {
+                    const hand = results.multiHandLandmarks[i];
+                    const handedness = results.multiHandedness[i].label;
+
+                    if (handedness === 'Left') {
+                        leftHand = hand;
+                    } else {
+                        rightHand = hand;
+                    }
+
+                    drawConnectors(ctx, hand, HAND_CONNECTIONS, {color: '#00FF00', lineWidth: 2});
+                    drawLandmarks(ctx, hand, {color: '#FF0000', lineWidth: 1, radius: 3});
+                }
+            }
+
+            if (rightHand) {
+                currentGesture = detectGesture(rightHand); 
+                updateHandMesh(rightHand);
+            } else {
+                if (handMesh) {
+                    scene.remove(handMesh);
+                    handMesh = null;
+                }
+            }
+
+            ctx.restore();
+        }
+    }
+
+    function detectGesture(hand) {
+        const fingertips = [4, 8, 12, 16, 20];
+        let fingersExtended = 0;
+        for (let i = 0; i < fingertips.length; i++) {
+            const tip = hand[fingertips[i]];
+            const pip = hand[fingertips[i] - 2];
+            if (tip.y < pip.y) {
+                fingersExtended++;
+            }
+        }
+        return fingersExtended.toString();
+    }
+
+    function updateHandMesh(handLandmarks) {
+        if (!handMesh) {
+            const geometry = new THREE.BufferGeometry();
+            const positions = new Float32Array(handLandmarks.length * 3);
+            geometry.setAttribute('position', new THREE.BufferAttribute(positions, 3));
+
+            handMaterial = new THREE.PointsMaterial({
+                color: 0x00ffcc,
+                size: 0.1,
+                transparent: true,
+                opacity: 0.7,
+                blending: THREE.AdditiveBlending
+            });
+
+            handMesh = new THREE.Points(geometry, handMaterial);
+            scene.add(handMesh);
+        }
+
+        const positions = handMesh.geometry.attributes.position.array;
+        for (let i = 0; i < handLandmarks.length; i++) {
+            positions[i * 3] = (handLandmarks[i].x - 0.5) * 20;
+            positions[i * 3 + 1] = (0.5 - handLandmarks[i].y) * 20;
+            positions[i * 3 + 2] = -handLandmarks[i].z * 20;
+        }
+        handMesh.geometry.attributes.position.needsUpdate = true;
+    }
+
+    function updateParticles() {
+        const positions = particleSystem.geometry.attributes.position.array;
+        const colors = particleSystem.geometry.attributes.color.array;
+
+        if (['0', '1', '2', '3', '4', '5'].includes(currentGesture)) {
+            drawNumber(currentGesture);
+        } else if (rightHand) {
+            // 
+            for (let i = 0; i < positions.length; i += 3) {
+                let closestDistance = Infinity;
+                for (const landmark of rightHand) {
+                    const distance = Math.sqrt(
+                        Math.pow(positions[i] - (landmark.x - 0.5) * 20, 2) +
+                        Math.pow(positions[i + 1] - (0.5 - landmark.y) * 20, 2) +
+                        Math.pow(positions[i + 2] - landmark.z * 20, 2)
+                    );
+                    if (distance < closestDistance) {
+                        closestDistance = distance;
+                        targetPositions[i] = (landmark.x - 0.5) * 20;
+                        targetPositions[i + 1] = (0.5 - landmark.y) * 20;
+                        targetPositions[i + 2] = landmark.z * 20;
+                    }
+                }
+            }
+        } else {
+            // 
+            for (let i = 0; i < targetPositions.length; i += 3) {
+                targetPositions[i] = (Math.random() - 0.5) * 20;
+                targetPositions[i + 1] = (Math.random() - 0.5) * 20;
+                targetPositions[i + 2] = (Math.random() - 0.5) * 20;
+            }
+        }
+
+        for (let i = 0; i < positions.length; i += 3) {
+            positions[i] += (targetPositions[i] - positions[i]) * 0.1;
+            positions[i + 1] += (targetPositions[i + 1] - positions[i + 1]) * 0.1;
+            positions[i + 2] += (targetPositions[i + 2] - positions[i + 2]) * 0.1;
+
+            const distanceFromTarget = Math.sqrt(
+                Math.pow(targetPositions[i] - positions[i], 2) +
+                Math.pow(targetPositions[i + 1] - positions[i + 1], 2) +
+                Math.pow(targetPositions[i + 2] - positions[i + 2], 2)
+            );
+
+            const glowIntensity = Math.max(0, 1 - distanceFromTarget / 2);
+            colors[i] = 0.2 + glowIntensity * 0.3 + audioIntensity * 0.5;     // R
+            colors[i + 1] = 0.5 + glowIntensity * 0.3 + audioIntensity * 0.3; // G
+            colors[i + 2] = 1;                                                // B
+        }
+
+        particleSystem.geometry.attributes.position.needsUpdate = true;
+        particleSystem.geometry.attributes.color.needsUpdate = true;
+    }
+
+    function drawNumber(number) {
+        const digitWidth = 5;
+        const digitHeight = 5;
+        const spacing = 1;
+        
+        const digits = {
+            '0': [
+                [1,1,1,1,1],
+                [1,0,0,0,1],
+                [1,0,0,0,1],
+                [1,0,0,0,1],
+                [1,1,1,1,1]
+            ],
+            '1': [
+                [0,0,1,0,0],
+                [0,1,1,0,0],
+                [1,0,1,0,0],
+                [0,0,1,0,0],
+                [1,1,1,1,1]
+            ],
+            '2': [
+                [1,1,1,1,1],
+                [0,0,0,0,1],
+                [1,1,1,1,1],
+                [1,0,0,0,0],
+                [1,1,1,1,1]
+            ],
+            '3': [
+                [1,1,1,1,1],
+                [0,0,0,0,1],
+                [1,1,1,1,1],
+                [0,0,0,0,1],
+                [1,1,1,1,1]
+            ],
+            '4': [
+                [1,0,0,0,1],
+                [1,0,0,0,1],
+                [1,1,1,1,1],
+                [0,0,0,0,1],
+                [0,0,0,0,1]
+            ],
+            '5': [
+                [1,1,1,1,1],
+                [1,0,0,0,0],
+                [1,1,1,1,1],
+                [0,0,0,0,1],
+                [1,1,1,1,1]
+            ]
+        };
+
+        const digit = digits[number];
+        let index = 0;
+
+        for (let i = 0; i < digitHeight; i++) {
+            for (let j = 0; j < digitWidth; j++) {
+                const isPixelOn = digit[i][j] === 1;
+                for (let k = 0; k < particleCount / (digitWidth * digitHeight); k++) {
+                    const idx = (index + k) * 3;
+                    if (isPixelOn) {
+                        targetPositions[idx] = (j - digitWidth / 2) * spacing;
+                        targetPositions[idx + 1] = (digitHeight / 2 - i) * spacing;
+                        targetPositions[idx + 2] = 0;
+                    } else {
+                        targetPositions[idx] = (Math.random() - 0.5) * 20;
+                        targetPositions[idx + 1] = (Math.random() - 0.5) * 20;
+                        targetPositions[idx + 2] = (Math.random() - 0.5) * 20;
+                    }
+                }
+                index += particleCount / (digitWidth * digitHeight);
+            }
+        }
+    }
+
+    function updateCameraPosition() {
+        if (leftHand) {
+            const palmCenter = leftHand[0];
+
+            const targetX = (palmCenter.x - 0.5) * 40;
+            const targetY = (0.5 - palmCenter.y) * 40;
+
+            camera.position.lerp(new THREE.Vector3(targetX, targetY, camera.position.z), 0.1);
+        }
+        camera.lookAt(scene.position);
+    }
+
+    function updateBackgroundColor() {
+        analyser.getByteFrequencyData(dataArray);
+        microphoneAnalyser.getByteFrequencyData(microphoneDataArray);
+
+        const averageFile = dataArray.reduce((sum, value) => sum + value, 0) / dataArray.length;
+        const averageMic = microphoneDataArray.reduce((sum, value) => sum + value, 0) / microphoneDataArray.length;
+
+        const normalizedAverage = Math.max(averageFile, averageMic) / 255;
+        audioIntensity = normalizedAverage;
+
+        isSpeaking = averageMic > 20; //
+
+        // 
+        audioMeshMaterial.opacity = 0.1 + audioIntensity * 0.2;
+        audioMeshMaterial.color.setHSL(normalizedAverage * 0.5, 1, 0.5);
+
+        // 
+        particleSystem.material.size = 0.05 + audioIntensity * 0.1;
+    }
+
+    function updateAudioVisualizer() {
+        const canvas = document.getElementById('audioVisualizer');
+        const ctx = canvas.getContext('2d');
+        const width = canvas.width;
+        const height = canvas.height;
+
+        ctx.clearRect(0, 0, width, height);
+        ctx.fillStyle = 'rgb(0, 255, 0)';
+
+        const barWidth = (width / analyser.frequencyBinCount) * 2.5;
+        let x = 0;
+
+        for (let i = 0; i < analyser.frequencyBinCount; i++) {
+            const barHeight = Math.max(dataArray[i], microphoneDataArray[i]) / 2;
+            ctx.fillRect(x, height - barHeight, barWidth, barHeight);
+            x += barWidth + 1;
+        }
+    }
+
+    function onWindowResize() {
+        camera.aspect = window.innerWidth / window.innerHeight;
+        camera.updateProjectionMatrix();
+        renderer.setSize(window.innerWidth, window.innerHeight);
+    }
+
+    function animate() {
+        requestAnimationFrame(animate);
+
+        updateParticles();
+        updateCameraPosition();
+        updateBackgroundColor();
+        updateAudioVisualizer();
+
+        renderer.render(scene, camera);
+    }
+
+    init();
+    </script>
+</body>
+</html>
